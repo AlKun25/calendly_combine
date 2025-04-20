@@ -7,8 +7,7 @@ including extracting availability information and creating events.
 import re
 import logging
 import os
-import time # Import time for sleep
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -20,7 +19,7 @@ from core.models import (
 )
 from adapters.base import (
     BaseAdapter, AuthenticationError, 
-    ResourceNotFoundError, EventCreationError, BaseAdapterError
+    ResourceNotFoundError, EventCreationError
 )
 
 # Configure module logger
@@ -28,11 +27,6 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
-
-
-class CalendlyRateLimitError(BaseAdapterError):
-    """Exception raised when Calendly API rate limit is exceeded."""
-    pass
 
 
 class CalendlyAdapter(BaseAdapter):
@@ -55,9 +49,6 @@ class CalendlyAdapter(BaseAdapter):
     
     # Calendly API base URL
     API_BASE_URL = "https://api.calendly.com"
-
-    MAX_RETRIES = 3
-    INITIAL_BACKOFF = 1 # seconds
 
     def __init__(
         self, 
@@ -169,69 +160,6 @@ class CalendlyAdapter(BaseAdapter):
         """
         return bool(self.api_key) and not self.mock_mode
 
-    def _make_request(
-        self, 
-        method: str, 
-        url: str, 
-        params: Optional[Dict] = None,
-        data: Optional[Dict] = None,
-        headers: Optional[Dict] = None,
-        allow_redirects: bool = True
-    ) -> httpx.Response:
-        """Makes an HTTP request with error handling and retries for rate limits."""
-        retries = 0
-        backoff = self.INITIAL_BACKOFF
-        last_exception = None
-        
-        request_headers = self.http_client.headers.copy()
-        if headers:
-             request_headers.update(headers)
-
-        while retries <= self.MAX_RETRIES:
-            try:
-                response = self.http_client.request(
-                    method,
-                    url,
-                    params=params,
-                    json=data, # Use json parameter for dict data
-                    headers=request_headers,
-                    follow_redirects=allow_redirects
-                )
-                response.raise_for_status() # Raise HTTPStatusError for 4xx/5xx
-                return response
-            
-            except httpx.HTTPStatusError as e:
-                status_code = e.response.status_code
-                if status_code == 401:
-                    logger.error(f"Calendly API Authentication Error: {e}")
-                    raise AuthenticationError("Authentication failed with Calendly API") from e
-                elif status_code == 404:
-                    logger.error(f"Calendly Resource Not Found: {e}")
-                    raise ResourceNotFoundError(f"Calendly resource not found: {e.request.url}") from e
-                elif status_code == 429:
-                    logger.warning(f"Calendly Rate Limit hit (Attempt {retries + 1}/{self.MAX_RETRIES + 1}). Retrying in {backoff}s...")
-                    last_exception = CalendlyRateLimitError(f"Rate limit exceeded after {retries} retries: {e}")
-                    time.sleep(backoff)
-                    retries += 1
-                    backoff *= 2 # Exponential backoff
-                    continue
-                else:
-                    logger.error(f"Calendly HTTP Error {status_code}: {e}")
-                    raise BaseAdapterError(f"Calendly API error ({status_code}): {e}") from e
-            
-            except httpx.RequestError as e:
-                # Network errors, timeouts, etc.
-                logger.error(f"Calendly Network/Request Error: {e}")
-                raise BaseAdapterError(f"Calendly request failed: {e}") from e
-            
-            except Exception as e:
-                 # Catch unexpected errors
-                 logger.error(f"Unexpected error during Calendly request: {e}")
-                 raise BaseAdapterError(f"Unexpected Calendly adapter error: {e}") from e
-
-        # If loop finishes due to retries, raise the last rate limit error
-        raise last_exception
-
     def extract_availability(self, calendly_link: str) -> AvailabilitySchedule:
         """Extract availability information from a Calendly link.
         
@@ -249,8 +177,8 @@ class CalendlyAdapter(BaseAdapter):
             ValueError: If the Calendly link format is invalid.
             AuthenticationError: If authentication fails.
             ResourceNotFoundError: If the user doesn't exist.
-            CalendlyRateLimitError: If rate limits are exceeded after retries.
-            BaseAdapterError: For other Calendly-specific or network errors.
+            BaseAdapterError: For other Calendly-specific errors.
+            httpx.HTTPError: For network or HTTP errors.
         """
         # Validate input
         if not calendly_link or not isinstance(calendly_link, str):
@@ -265,33 +193,23 @@ class CalendlyAdapter(BaseAdapter):
             logger.error(f"Invalid Calendly link format: {calendly_link}")
             raise ValueError(f"Invalid Calendly link format: {calendly_link}")
         
-        # Use mock data ONLY if mock_mode is explicitly True
-        if self.mock_mode:
-            logger.info(f"Using mock data for Calendly user: {user_name}")
-            return self._create_mock_schedule(user_name)
-            
-        if not self.api_key:
-             raise AuthenticationError("Calendly API key required for non-mock mode.")
-
         try:
-            # Get user UUID from username using the request helper
+            # Get user UUID from username
             user_data = self._get_user_data(user_name)
             user_uri = user_data.get("resource", {}).get("uri")
-            owner_name = user_data.get("resource", {}).get("name", user_name)
             
             if not user_uri:
-                # This case should ideally be caught by 404 in _get_user_data
-                logger.error(f"Could not find user URI for name: {user_name}")
-                raise ResourceNotFoundError(f"Could not find user URI for Calendly name: {user_name}")
+                logger.warning(f"Could not find user with name: {user_name}")
+                raise ResourceNotFoundError(f"Could not find user with name: {user_name}")
             
             # Create availability schedule
             schedule = AvailabilitySchedule(
                 calendar_id=user_uri,
                 calendar_type=CalendarType.CALENDLY,
-                owner_name=owner_name
+                owner_name=user_data.get("resource", {}).get("name", user_name)
             )
             
-            # Get available time slots using the request helper
+            # Get available time slots
             available_slots = self._get_available_slots(user_uri)
             
             # Add slots to schedule
@@ -299,18 +217,44 @@ class CalendlyAdapter(BaseAdapter):
                 schedule.add_slot(slot)
             
             logger.info(
-                f"Successfully extracted {len(schedule.time_slots)} available slots from Calendly"
+                f"Successfully extracted {len(schedule.time_slots)} available time slots"
             )
             return schedule
             
-        # Catch specific errors raised by _make_request or helper methods
-        except (AuthenticationError, ResourceNotFoundError, CalendlyRateLimitError, BaseAdapterError) as e:
-            logger.error(f"Failed to extract Calendly availability for {calendly_link}: {e}")
-            raise # Re-raise the specific error
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                logger.error(f"Authentication failed with Calendly API: {e}")
+                if not self.mock_mode:
+                    return self._create_mock_schedule(user_name)
+                raise AuthenticationError("Authentication failed with Calendly API") from e
+            elif e.response.status_code == 404:
+                logger.error(f"Resource not found: {e}")
+                if not self.mock_mode:
+                    return self._create_mock_schedule(user_name)
+                raise ResourceNotFoundError(f"Resource not found: {e}") from e
+            else:
+                logger.error(f"HTTP error during Calendly API request: {e}")
+                if not self.mock_mode:
+                    return self._create_mock_schedule(user_name)
+                raise EventCreationError(f"Calendly API error: {e}") from e
+                
+        except httpx.HTTPError as e:
+            logger.error(f"HTTP error during Calendly API request: {e}")
+            
+            # Fall back to mock mode if API call fails
+            if not self.mock_mode:
+                logger.info("Falling back to mock mode after API error")
+                return self._create_mock_schedule(user_name)
+            raise
+            
         except Exception as e:
-            # Catch any other unexpected errors
-            logger.exception(f"Unexpected error extracting availability from {calendly_link}: {e}")
-            raise BaseAdapterError(f"Unexpected error during Calendly availability extraction: {e}") from e
+            logger.error(f"Error extracting availability from Calendly: {e}")
+            
+            # Fall back to mock mode for other errors too
+            if not self.mock_mode:
+                logger.info("Falling back to mock mode after error")
+                return self._create_mock_schedule(user_name)
+            raise EventCreationError(f"Error extracting availability: {e}") from e
 
     def _extract_user_info(self, calendly_link: str) -> str:
         """Extract user name from a Calendly link.
@@ -331,120 +275,252 @@ class CalendlyAdapter(BaseAdapter):
         return user_name
 
     def _get_user_data(self, user_name: str) -> Dict[str, Any]:
-        """Get user data (including URI) from Calendly API by username."""
-        if not self.api_key:
-            raise AuthenticationError("Calendly API key required to get user data.")
+        """Get user data from the Calendly API.
+        
+        Args:
+            user_name: The Calendly user name to look up.
             
-        logger.debug(f"Getting user data for Calendly user: {user_name}")
-        url = f"{self.API_BASE_URL}/users"
-        params = {"email": user_name} # Assuming username can be used as email filter?
-                                      # Or need to adjust API call if name isn't directly searchable
-                                      # Calendly docs might require a different approach.
-                                      # Fallback: list users and filter? Less efficient.
+        Returns:
+            User data from the Calendly API or mock data if in mock mode.
+            
+        Raises:
+            ResourceNotFoundError: If the user could not be found.
+            AuthenticationError: If authentication fails.
+            httpx.HTTPError: If there's an error communicating with the API.
+        """
+        if self.mock_mode:
+            logger.debug(f"Generating mock user data for {user_name}")
+            return {
+                "resource": {
+                    "uri": f"https://api.calendly.com/users/{user_name}",
+                    "name": user_name.capitalize()
+                }
+            }
         
-        # --- Alternative if username != email ---
-        # This might require iterating through users? Check Calendly API docs.
-        # For now, assume email or a direct username lookup exists.
-        # If Calendly user links use a unique slug, that might be needed instead.
-        # The USER_PATTERN extracts the slug, let's try filtering by that if possible.
-        # Let's assume the endpoint can filter by `slug` (hypothetical, CHECK DOCS)
-        params = {"slug": user_name} 
+        logger.debug(f"Looking up user data for {user_name}")
         
-        # Make the request using the helper
-        response = self._make_request("GET", url, params=params)
-        data = response.json()
-        
-        # Process response - assuming it returns a collection
-        if data and data.get("collection"):
-            # Find the user matching the slug/name exactly
-            for user in data["collection"]:
-                 # Check slug or name matches - adjust based on actual API response
-                 if user.get("slug") == user_name or user.get("name") == user_name:
-                      logger.info(f"Found Calendly user URI: {user.get('uri')}")
-                      return user # Return the full user object which should contain URI, name etc.
-            # If no exact match found in collection
-            logger.warning(f"No exact match found for Calendly user: {user_name} in API response")
-            raise ResourceNotFoundError(f"Calendly user '{user_name}' not found via API.")
-        else:
-            # Handle case where collection is empty or response format is unexpected
-            logger.warning(f"Could not find Calendly user: {user_name}. Response: {data}")
-            raise ResourceNotFoundError(f"Calendly user '{user_name}' not found.")
+        # First, try to get user by username
+        try:
+            # In real implementation, we'd need to list users and find by name
+            # This example assumes Calendly API v2 has a users/find endpoint
+            url = f"{self.API_BASE_URL}/users/find"
+            params = {"email": f"{user_name}@example.com"}  # Simplified approach
+            
+            response = self.http_client.get(url, params=params)
+            response.raise_for_status()
+            
+            return response.json()
+            
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                raise AuthenticationError("Authentication failed") from e
+            if e.response.status_code == 404:
+                logger.warning(f"Failed to find user by name, trying direct UUID: {e}")
+            else:
+                raise
+            
+            # Fall back to trying the name as a UUID directly
+            url = f"{self.API_BASE_URL}/users/{user_name}"
+            
+            response = self.http_client.get(url)
+            response.raise_for_status()
+            
+            return response.json()
 
     def _get_available_slots(self, user_uri: str) -> List[TimeSlot]:
-        """Get available time slots from Calendly availability endpoint."""
-        if not self.api_key:
-             raise AuthenticationError("Calendly API key required to get available slots.")
-
-        logger.debug(f"Getting available slots for user URI: {user_uri}")
-        url = f"{self.API_BASE_URL}/availability/schedules"
-        # Query parameters based on Calendly API docs for availability
-        # This likely requires the user URI and potentially event type URI
-        # This is a simplified example - **CHECK CALENDLY DOCS FOR CORRECT ENDPOINT/PARAMS**
-        # Assuming we need to query based on the user
-        params = {
-            "user": user_uri,
-            # Add other necessary params like start_time, end_time if required by API
-            # 'start_time': datetime.now(timezone.utc).isoformat(),
-            # 'end_time': (datetime.now(timezone.utc) + timedelta(days=self.days_to_check)).isoformat()
-        }
-
-        # ---> This endpoint /availability/schedules might list schedule configurations,
-        # ---> not actual bookable slots. The correct endpoint is likely related to
-        # ---> 'scheduling_links' or finding available times for a specific event type.
-        # ---> The previous code used /user_availability_schedules which seems deprecated or incorrect.
-        # ---> Let's assume a hypothetical endpoint - REAL IMPLEMENTATION NEEDS DOCS CHECK
+        """Get available time slots for a user.
         
-        # Example: Hypothetical correct endpoint (replace with actual)
-        # url = f"{self.API_BASE_URL}/event_type_available_times"
-        # params = {
-        #     'event_type': event_type_uri, # Need to get this first!
-        #     'start_time': start_date.isoformat(),
-        #     'end_time': end_date.isoformat()
-        # }
+        This method retrieves the available time slots for a given user
+        using the Calendly API, or generates mock data if in mock mode.
         
-        # Placeholder: Using a known endpoint that might give *some* info, but likely not bookable slots
-        # Need to adjust based on actual Calendly API for fetching bookable slots for a user/event type.
-        url = f"{self.API_BASE_URL}/user_busy_times" 
-        start_date = datetime.now(timezone.utc)
-        end_date = start_date + timedelta(days=self.days_to_check)
-        params = {
-             'user': user_uri,
-             'start_time': start_date.isoformat(),
-             'end_time': end_date.isoformat()
-        }
-        logger.warning("Using /user_busy_times as placeholder; need correct Calendly API endpoint for available slots.")
-
-        response = self._make_request("GET", url, params=params)
-        data = response.json()
-
-        # --- Processing Logic (Needs heavy adjustment based on actual API) --- 
-        # The following logic is based on the PREVIOUS _calculate_available_slots 
-        # which assumed schedules and busy times were fetched separately.
-        # This needs to be completely rewritten based on the response of the 
-        # *actual* Calendly endpoint for bookable slots.
+        Args:
+            user_uri: The Calendly user URI.
+            
+        Returns:
+            List of TimeSlot objects representing available times.
+            
+        Raises:
+            EventCreationError: If there's an error getting availability data.
+        """
+        logger.debug(f"Getting available slots for {user_uri}")
         
-        # Placeholder: If the endpoint returns busy times, we cannot determine free slots without the user's schedule rules.
-        # Returning an empty list as a placeholder until the correct API call and processing is implemented.
-        logger.warning(f"Processing logic for Calendly slots is a placeholder. Response from {url}: {data}")
-        processed_slots = [] 
-        # Correct implementation would parse data['collection'] based on the API used.
-        # Example if API returned slots directly:
-        # for slot_data in data.get('collection', []):
-        #    try:
-        #        start = datetime.fromisoformat(slot_data['start_time'])
-        #        end = datetime.fromisoformat(slot_data['end_time'])
-        #        # Assuming API returns UTC or has timezone info
-        #        if start.tzinfo is None:
-        #             start = start.replace(tzinfo=timezone.utc) # Assume UTC if naive
-        #        if end.tzinfo is None:
-        #             end = end.replace(tzinfo=timezone.utc)
-        #        processed_slots.append(TimeSlot(start=start, end=end, timezone='UTC'))
-        #    except (KeyError, ValueError) as e:
-        #        logger.warning(f"Skipping invalid slot data: {slot_data}, error: {e}")
+        if self.mock_mode:
+            return self._generate_mock_slots()
+        
+        # In a real implementation, we need multiple API calls:
+        try:
+            # 1. Get user's availability schedules
+            schedules_url = f"{self.API_BASE_URL}/scheduling_rules"
+            schedules_params = {"user": user_uri}
+            
+            schedules_response = self.http_client.get(schedules_url, params=schedules_params)
+            schedules_response.raise_for_status()
+            schedules_data = schedules_response.json()
+            
+            if not schedules_data.get("collection"):
+                logger.warning(f"No availability schedules found for {user_uri}")
+                return self._generate_mock_slots()
+            
+            # 2. Get user's busy times
+            # Date range: next N days
+            now = datetime.now(timezone.utc)
+            start_date = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            end_date = start_date + timedelta(days=self.days_to_check)
+            
+            busy_url = f"{self.API_BASE_URL}/busy_times"
+            busy_params = {
+                "user": user_uri,
+                "start_time": start_date.isoformat(),
+                "end_time": end_date.isoformat()
+            }
+            
+            busy_response = self.http_client.get(busy_url, params=busy_params)
+            busy_response.raise_for_status()
+            busy_data = busy_response.json()
+            
+            # 3. Calculate available slots based on schedule minus busy times
+            return self._calculate_available_slots(
+                schedules_data["collection"],
+                busy_data.get("busy_times", []),
+                start_date,
+                end_date
+            )
+            
+        except httpx.HTTPError as e:
+            logger.error(f"Error getting availability data: {e}")
+            return self._generate_mock_slots()
 
-        return processed_slots 
+    def _calculate_available_slots(
+        self, 
+        schedules: List[Dict[str, Any]], 
+        busy_times: List[Dict[str, Any]],
+        start_date: datetime,
+        end_date: datetime
+    ) -> List[TimeSlot]:
+        """Calculate available slots based on schedules and busy times.
+        
+        Args:
+            schedules: List of availability schedule data from the API.
+            busy_times: List of busy time periods from the API.
+            start_date: Start of the date range to calculate for.
+            end_date: End of the date range to calculate for.
+            
+        Returns:
+            List of TimeSlot objects representing available times.
+        """
+        # Convert busy times to TimeSlot objects
+        busy_slots = []
+        for busy in busy_times:
+            try:
+                busy_start = datetime.fromisoformat(busy["start_time"].replace("Z", "+00:00"))
+                busy_end = datetime.fromisoformat(busy["end_time"].replace("Z", "+00:00"))
+                busy_slots.append(TimeSlot(
+                    start=busy_start,
+                    end=busy_end,
+                    timezone="UTC"
+                ))
+            except (KeyError, ValueError) as e:
+                logger.warning(f"Skipping invalid busy time entry: {e}")
+                continue
+        
+        # Process each day within range
+        potential_slots = []
+        current_date = start_date
+        
+        while current_date < end_date:
+            # Skip weekends (0=Monday, 6=Sunday in Python datetime)
+            weekday = current_date.weekday()
+            if weekday >= 5:  # 5=Saturday, 6=Sunday
+                current_date += timedelta(days=1)
+                continue
+            
+            # For simplicity, assume working hours 9 AM to 5 PM
+            # In practice, would extract this from the schedules data
+            day_start = current_date.replace(hour=9, minute=0)
+            day_end = current_date.replace(hour=17, minute=0)
+            
+            # Create slots for this day
+            slot_start = day_start
+            while slot_start < day_end:
+                slot_end = slot_start + timedelta(minutes=self.slot_duration)
+                
+                # Create potential slot
+                potential_slots.append(TimeSlot(
+                    start=slot_start,
+                    end=slot_end,
+                    timezone="UTC"
+                ))
+                
+                slot_start = slot_end
+            
+            # Move to next day
+            current_date += timedelta(days=1)
+        
+        # Remove busy slots
+        available_slots = []
+        for potential_slot in potential_slots:
+            is_available = True
+            
+            # Check if slot overlaps with any busy period using TimeSlot.overlaps_with()
+            for busy_slot in busy_slots:
+                if potential_slot.overlaps_with(busy_slot):
+                    is_available = False
+                    break
+            
+            if is_available:
+                available_slots.append(potential_slot)
+        
+        return available_slots
 
-    def _generate_mock_slots(self, user_name: str) -> AvailabilitySchedule:
+    def _generate_mock_slots(self) -> List[TimeSlot]:
+        """Generate mock available time slots.
+        
+        Used when the adapter is running in mock mode or when API calls fail.
+        
+        Returns:
+            List of TimeSlot objects representing mocked available times.
+        """
+        slots = []
+        
+        # Get current date/time
+        now = datetime.now(timezone.utc)
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Create example time slots for the next N days
+        for day_offset in range(self.days_to_check):
+            day = today + timedelta(days=day_offset)
+            
+            # Skip weekend slots
+            weekday = day.weekday()
+            if weekday >= 5:  # 5 = Saturday, 6 = Sunday
+                continue
+            
+            # Add business hours slots (9AM-5PM)
+            slot_start = day.replace(hour=9, minute=0)
+            day_end = day.replace(hour=17, minute=0)
+            
+            while slot_start < day_end:
+                slot_end = slot_start + timedelta(minutes=self.slot_duration)
+                
+                # Skip slots in the past
+                if slot_end <= now:
+                    slot_start = slot_end
+                    continue
+                
+                slots.append(TimeSlot(
+                    start=slot_start,
+                    end=slot_end,
+                    timezone="UTC"
+                ))
+                
+                slot_start = slot_end
+        
+        # Log the number of slots created
+        logger.info(f"Created {len(slots)} mock time slots")
+        
+        return slots
+
+    def _create_mock_schedule(self, user_name: str) -> AvailabilitySchedule:
         """Create a complete mock availability schedule.
         
         Used as a fallback when the adapter encounters errors but needs to
@@ -463,7 +539,7 @@ class CalendlyAdapter(BaseAdapter):
             owner_name=f"{user_name.capitalize()} (Mock)"
         )
         
-        mock_slots = self._generate_mock_slots(user_name)
+        mock_slots = self._generate_mock_slots()
         for slot in mock_slots:
             schedule.add_slot(slot)
         

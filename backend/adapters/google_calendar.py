@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 from core.models import (
@@ -38,6 +40,8 @@ class GoogleCalendarAdapter(BaseAdapter):
     2. Create events in Google Calendar
     
     Attributes:
+        credentials_path: Path to the Google API credentials file
+        token_path: Path to store the authentication token
         api_key: Optional API key for requests that don't require OAuth
     """
     
@@ -50,19 +54,27 @@ class GoogleCalendarAdapter(BaseAdapter):
     BOOKING_API_BASE_URL = "https://calendar-pa.clients6.google.com/v1/calendar"
     
     def __init__(
-        self,
+        self, 
+        credentials_path: Optional[str] = None, 
+        token_path: Optional[str] = None,
         api_key: Optional[str] = None
     ):
         """Initialize the Google Calendar adapter.
-
+        
         Args:
+            credentials_path: Path to the Google API credentials file
+            token_path: Path to store the authentication token
             api_key: Optional Google Calendar API key for non-OAuth requests
-                     (Note: Currently primarily uses OAuth via Clerk).
         """
+        self.credentials_path = credentials_path or os.getenv("GOOGLE_CREDENTIALS_PATH")
+        self.token_path = token_path or os.getenv("GOOGLE_TOKEN_PATH", "token.json")
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
-        self._credentials = None # Credentials will be passed per-request
-        self._service = None # Service will be built per-request with credentials
+        self._credentials = None
+        self._service = None
         self._http_client = None
+        
+        # Try to load existing credentials
+        self._load_credentials()
     
     @property
     def http_client(self) -> httpx.Client:
@@ -79,59 +91,102 @@ class GoogleCalendarAdapter(BaseAdapter):
                 
         return self._http_client
     
-    def authenticate(self, credentials: Optional[Credentials] = None) -> bool:
-        """Validate provided Google OAuth credentials.
-
-        This method now expects credentials (obtained via Clerk on the frontend)
-        to be passed in, rather than initiating an OAuth flow.
-
+    def _load_credentials(self) -> None:
+        """Load Google API credentials from file or refresh token."""
+        if os.path.exists(self.token_path):
+            try:
+                with open(self.token_path, "r") as token:
+                    self._credentials = Credentials.from_authorized_user_info(
+                        eval(token.read()), SCOPES
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to load token: {e}")
+                self._credentials = None
+        
+        # If credentials exist but expired, refresh them
+        if self._credentials and self._credentials.expired and self._credentials.refresh_token:
+            try:
+                self._credentials.refresh(Request())
+                self._save_credentials()
+            except Exception as e:
+                logger.warning(f"Failed to refresh token: {e}")
+                self._credentials = None
+    
+    def _save_credentials(self) -> None:
+        """Save the current credentials to the token file."""
+        if not self._credentials:
+            return
+            
+        # Save credentials to the file
+        with open(self.token_path, "w") as token:
+            token.write(str(self._credentials.to_json()))
+    
+    def authenticate(self, credentials: Dict[str, Any] = None) -> bool:
+        """Authenticate with Google Calendar API.
+        
         Args:
-            credentials: Google OAuth Credentials object.
-
+            credentials: Optional credentials dict if not using file
+            
         Returns:
-            True if the provided credentials appear valid (not expired).
-
+            True if authentication was successful
+            
         Raises:
-            AuthenticationError: If no credentials are provided or they are invalid/expired.
+            AuthenticationError: If authentication fails
         """
-        if not credentials or not isinstance(credentials, Credentials):
-            raise AuthenticationError("Google OAuth Credentials object required.")
-
-        # Check if credentials have expired (basic check, doesn't guarantee API access)
-        # Refresh logic should ideally happen before passing credentials here,
-        # managed by the Clerk frontend/backend interaction.
-        if credentials.expired:
-             # If refresh token exists, maybe try a refresh? Or expect frontend to handle.
-             # For now, consider expired credentials needing refresh as an error here.
-             # if credentials.refresh_token:
-             #     try:
-             #         # Note: This requires google.auth.transport.requests Request
-             #         # credentials.refresh(Request())
-             #         # return True # If refresh succeeds
-             #     except Exception as e:
-             #         logger.error(f"Failed to refresh Google token: {e}")
-             #         raise AuthenticationError(f"Google OAuth token expired and refresh failed: {e}")
-             raise AuthenticationError("Google OAuth token is expired.")
-
-        # Store credentials temporarily for potential immediate use (e.g., is_authenticated)
-        # This might be removed if is_authenticated is also removed or refactored.
-        self._credentials = credentials
-        return True
+        try:
+            # If already authenticated, return True
+            if self.is_authenticated():
+                return True
+                
+            # If credentials provided directly, use them
+            if credentials and 'token' in credentials:
+                self._credentials = Credentials(
+                    token=credentials.get('token'),
+                    refresh_token=credentials.get('refresh_token'),
+                    client_id=credentials.get('client_id'),
+                    client_secret=credentials.get('client_secret'),
+                    scopes=SCOPES,
+                    token_uri='https://oauth2.googleapis.com/token'
+                )
+                self._save_credentials()
+                return self.is_authenticated()
+            
+            # Otherwise, use credentials file
+            if not self.credentials_path or not os.path.exists(self.credentials_path):
+                raise AuthenticationError("No credentials file found")
+                
+            flow = InstalledAppFlow.from_client_secrets_file(
+                self.credentials_path, SCOPES
+            )
+            self._credentials = flow.run_local_server(port=0)
+            self._save_credentials()
+            
+            return self.is_authenticated()
+        except Exception as e:
+            logger.error(f"Google Calendar authentication failed: {e}")
+            raise AuthenticationError(f"Google Calendar authentication failed: {e}") from e
     
     def is_authenticated(self) -> bool:
-        """Check if valid credentials have been provided for the current request.
-
-        Note: This is less meaningful now as authentication is checked per-request
-        via Clerk middleware. This method primarily checks if credentials
-        were passed to `authenticate` recently.
+        """Check if authenticated with Google Calendar API.
+        
+        Returns:
+            True if authenticated, False otherwise
         """
-        # Check if credentials exist and are not expired
-        if not self._credentials or not isinstance(self._credentials, Credentials):
-             return False
-        if self._credentials.expired:
-             # A refresh token existing doesn't guarantee it will work,
-             # and refresh should happen before calling adapter methods.
-             return False
+        if not self._credentials:
+            return False
+            
+        # If credentials exist but expired and can't be refreshed, consider not authenticated
+        if self._credentials.expired and not self._credentials.refresh_token:
+            return False
+            
+        # Initialize service if needed
+        if not self._service:
+            try:
+                self._service = build('calendar', 'v3', credentials=self._credentials)
+            except Exception as e:
+                logger.error(f"Failed to build Google Calendar service: {e}")
+                return False
+                
         return True
     
     def extract_availability(self, booking_link: str) -> AvailabilitySchedule:
@@ -492,86 +547,67 @@ class GoogleCalendarAdapter(BaseAdapter):
             # Return empty list as last resort
             return []
 
-    def create_event(self, event: CalendarEvent, credentials: Optional[Credentials] = None) -> EventConfirmation:
-        """Create an event in Google Calendar using provided credentials.
-
+    def create_event(self, event: CalendarEvent) -> EventConfirmation:
+        """Create an event in Google Calendar.
+        
         Args:
-            event: The CalendarEvent object to create.
-            credentials: The Google OAuth Credentials object for the authenticated user.
-
+            event: The event to create
+            
         Returns:
-            An EventConfirmation object.
-
+            Confirmation details for the created event
+            
         Raises:
-            AuthenticationError: If credentials are not provided or invalid.
-            EventCreationError: If the event creation fails via the API.
+            AuthenticationError: If not authenticated
+            EventCreationError: If event creation fails
         """
-        if not credentials or not isinstance(credentials, Credentials):
-            raise AuthenticationError("Google OAuth credentials are required to create an event.")
-
-        # Simple check for expired credentials, although they should ideally be refreshed before this point.
-        if credentials.expired:
-            raise AuthenticationError("Provided Google OAuth credentials have expired.")
-
+        if not self.is_authenticated():
+            raise AuthenticationError("Not authenticated with Google Calendar")
+        
+        # Convert CalendarEvent to Google Calendar event format
+        calendar_id = 'primary'
+        if event.organizer:
+            calendar_id = event.organizer
+        
+        attendees = []
+        for participant in event.participants:
+            attendee = {'email': participant.email}
+            if participant.name:
+                attendee['displayName'] = participant.name
+            attendees.append(attendee)
+        
+        # Create the event
+        google_event = {
+            'summary': event.title,
+            'description': event.description or '',
+            'start': {
+                'dateTime': event.start_time.isoformat(),
+                'timeZone': event.timezone,
+            },
+            'end': {
+                'dateTime': event.end_time.isoformat(),
+                'timeZone': event.timezone,
+            },
+            'attendees': attendees,
+        }
+        
+        # Add location if specified
+        if event.location:
+            google_event['location'] = event.location
+        
         try:
-            # Build the service dynamically with the provided credentials
-            service = build('calendar', 'v3', credentials=credentials)
-
-            # Prepare event body for Google API
-            event_body = {
-                'summary': event.title,
-                'description': event.description,
-                'location': event.location,
-                'start': {
-                    'dateTime': event.start_time.isoformat(),
-                    'timeZone': event.timezone,
-                },
-                'end': {
-                    'dateTime': event.end_time.isoformat(),
-                    'timeZone': event.timezone,
-                },
-                'attendees': [
-                    {'email': p.email, 'displayName': p.name}
-                    for p in event.participants
-                ],
-                # Add organizer if provided
-                # 'organizer': {'email': event.organizer} if event.organizer else None,
-                # Add other relevant fields if needed (e.g., recurrence, reminders)
-                'reminders': {
-                    'useDefault': True,
-                },
-            }
-            # Remove None values from attendees list
-            event_body['attendees'] = [att for att in event_body['attendees'] if att is not None]
-            # Add organizer only if it exists
-            if event.organizer:
-                event_body['organizer'] = {'email': event.organizer, 'self': True} # Mark organizer as self
-
-
-            logger.info(f"Creating Google Calendar event: {event.title}")
-            created_event = service.events().insert(
-                calendarId='primary', # Use 'primary' calendar
-                body=event_body,
-                sendNotifications=True # Notify attendees
+            created_event = self._service.events().insert(
+                calendarId=calendar_id,
+                body=google_event,
+                sendUpdates='all'  # Send emails to attendees
             ).execute()
-
-            logger.info(f"Event created successfully with ID: {created_event.get('id')}")
-
+            
             return EventConfirmation(
-                event_id=created_event.get('id'),
-                calendar_link=created_event.get('htmlLink'),
-                event=event, # Return the original event data
-                status=created_event.get('status', 'confirmed'),
+                event_id=created_event['id'],
+                calendar_link=created_event['htmlLink'],
+                event=event,
+                status=created_event['status'],
                 provider=CalendarType.GOOGLE
             )
-
         except Exception as e:
             logger.error(f"Failed to create Google Calendar event: {e}")
-            # Check for specific Google API errors if possible
-            # Example: from googleapiclient.errors import HttpError
-            # if isinstance(e, HttpError):
-            #     if e.resp.status == 401:
-            #         raise AuthenticationError(f"Google API authentication error: {e}") from e
-            #     elif e.resp.status == 403:
-            #          raise AuthenticationError(f"Google API permission error: {e}") from e
-            raise EventCreationError(f"Failed to create Google Calendar event: {str(e)}") from e
+            raise EventCreationError(f"Failed to create Google Calendar event: {e}") from e
