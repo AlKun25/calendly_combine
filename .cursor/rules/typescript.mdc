@@ -1,0 +1,291 @@
+---
+description: 
+globs: *.ts,*.tsx
+alwaysApply: false
+---
+# TypeScript Best Practices for Next.js 15
+
+You are an expert TypeScript developer working with Next.js 15 and React 19. Follow these guidelines to implement type-safe code:
+
+## Core TypeScript Principles
+
+- Use TypeScript for all code, no untyped JavaScript
+- Prefer explicit types over relying on inference for public APIs
+- Use inference for local variables where the type is obvious
+- Avoid using `any` type - use `unknown` instead when type is uncertain
+- Enable strict TypeScript checking in your tsconfig.json
+
+## Project Configuration
+
+```jsonc
+// tsconfig.json best practices
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true, // Enable all strict type-checking options
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./src/*"] // Path aliases for cleaner imports
+    }
+  },
+  "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", ".next/types/**/*.ts"],
+  "exclude": ["node_modules"]
+}
+```
+
+## Type Definitions
+
+- Use interfaces for object shapes that will be extended or implemented
+- Use type aliases for unions, intersections, and simpler object shapes
+- Prefer readonly modifiers for immutable data
+- Use discriminated unions for state machines and complex type variations
+
+```tsx
+// Use interfaces for extensible object shapes
+interface User {
+  id: string;
+  name: string;
+  email: string;
+}
+
+// Use types for unions and complex types
+type NotificationStatus = 'pending' | 'sent' | 'failed';
+
+// Use discriminated unions for state variations
+type AuthState = 
+  | { status: 'unauthenticated' }
+  | { status: 'authenticated', user: User }
+  | { status: 'loading' };
+
+// Use generics for reusable components and functions
+interface FetchResponse<T> {
+  data: T | null;
+  error: Error | null;
+  isLoading: boolean;
+}
+```
+
+## React Component Types
+
+- Use function declarations with explicit return types for components
+- Define prop types as interfaces or type aliases
+- Use children prop typing with React.ReactNode
+- Consider extracting common prop patterns to reusable types
+
+```tsx
+// Component prop typing
+interface ButtonProps {
+  variant?: 'primary' | 'secondary' | 'ghost';
+  size?: 'sm' | 'md' | 'lg';
+  isLoading?: boolean;
+  disabled?: boolean;
+  onClick?: () => void;
+  children: React.ReactNode;
+}
+
+export function Button({
+  variant = 'primary',
+  size = 'md',
+  isLoading = false,
+  disabled = false,
+  onClick,
+  children
+}: ButtonProps): JSX.Element {
+  // Component implementation
+}
+```
+
+## Next.js Specific Types
+
+- Use metadata types for layout and page metadata
+- Type properly for Server Components vs Client Components
+- Use proper params and searchParams types for dynamic routes
+- Type Server Actions with explicit input and return types
+
+```tsx
+// Page component with metadata and params typing
+import { Metadata } from 'next';
+
+interface PageProps {
+  params: { slug: string };
+  searchParams: { [key: string]: string | string[] | undefined };
+}
+
+export function generateMetadata({ params }: PageProps): Metadata {
+  return {
+    title: `Post: ${params.slug}`,
+    description: `This is the page for ${params.slug}`
+  };
+}
+
+export default function Page({ params, searchParams }: PageProps) {
+  return <div>Post: {params.slug}</div>;
+}
+```
+
+## Server Actions Typing
+
+```tsx
+// Server Action with proper types
+'use server'
+
+import { revalidatePath } from 'next/cache';
+import { z } from 'zod';
+
+// Define schema for validation
+const userSchema = z.object({
+  name: z.string().min(2),
+  email: z.string().email()
+});
+
+type UserInput = z.infer<typeof userSchema>;
+type ActionResponse = { success: true; data: User } | { success: false; error: string };
+
+export async function createUser(formData: FormData): Promise<ActionResponse> {
+  // Extract and validate data
+  const rawInput = {
+    name: formData.get('name'),
+    email: formData.get('email')
+  };
+  
+  // Validate with zod
+  const result = userSchema.safeParse(rawInput);
+  if (!result.success) {
+    return { success: false, error: result.error.message };
+  }
+  
+  try {
+    // Process the validated data
+    const user = await db.users.create(result.data);
+    revalidatePath('/users');
+    return { success: true, data: user };
+  } catch (error) {
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : 'Unknown error' 
+    };
+  }
+}
+```
+
+## API Routes Type Safety
+
+```tsx
+// API route with proper typing
+import { NextRequest, NextResponse } from 'next/server';
+
+export async function GET(
+  request: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const id = params.id;
+    const data = await fetchDataById(id);
+    
+    return NextResponse.json(data);
+  } catch (error) {
+    return NextResponse.json(
+      { error: 'Failed to fetch data' },
+      { status: 500 }
+    );
+  }
+}
+```
+
+## State Management Types
+
+```tsx
+'use client'
+
+import { create } from 'zustand';
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+}
+
+interface AuthState {
+  user: User | null;
+  isLoading: boolean;
+  error: string | null;
+  
+  // Actions
+  login: (email: string, password: string) => Promise<void>;
+  logout: () => void;
+  clearError: () => void;
+}
+
+export const useAuthStore = create<AuthState>((set) => ({
+  user: null,
+  isLoading: false,
+  error: null,
+  
+  login: async (email, password) => {
+    set({ isLoading: true, error: null });
+    try {
+      // API call
+      const user = await loginApi(email, password);
+      set({ user, isLoading: false });
+    } catch (error) {
+      set({ 
+        error: error instanceof Error ? error.message : 'Failed to login',
+        isLoading: false 
+      });
+    }
+  },
+  
+  logout: () => {
+    set({ user: null });
+  },
+  
+  clearError: () => {
+    set({ error: null });
+  }
+}));
+```
+
+## Utility Types
+
+- Use TypeScript's utility types (Pick, Omit, Partial, Required, etc.)
+- Create custom utility types for common patterns
+- Use template literal types for string patterns
+
+```tsx
+// Custom utility types
+type Nullable<T> = T | null;
+
+// Using utility types
+type UserUpdateInput = Partial<Omit<User, 'id'>>;
+
+// Template literal types
+type IconSize = `${number}px` | `${number}rem`;
+
+// Typed event handlers
+type InputChangeHandler = (event: React.ChangeEvent<HTMLInputElement>) => void;
+```
+
+## Type Safety Best Practices
+
+- Validate external data with runtime validation (Zod, Yup, etc.)
+- Use assertion functions for narrowing types
+- Implement proper error types and error handling
+- Use branded types for ID fields to prevent type confusion
+
+By following these TypeScript principles, you'll create more robust and maintainable Next.js applications with fewer runtime errors.

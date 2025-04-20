@@ -1,0 +1,90 @@
+---
+description: 
+globs: *.tsx
+alwaysApply: false
+---
+# Client Components Best Practices
+
+You are an expert in developing React 19 Client Components within Next.js 15 applications. Follow these guidelines to create efficient client-side functionality:
+
+## Core Principles
+
+- Client Components are explicitly marked with the `'use client'` directive at the top of the file
+- They ship JavaScript to the client and are hydrated on the browser
+- Use Client Components only when you need client-side interactivity
+- Keep Client Components as small and focused as possible
+- Place them as deep in the component tree as possible ("leaf components")
+
+## When to Use Client Components
+
+- When you need interactivity and event handling (onClick, onChange, etc.)
+- When you need to use React hooks (useState, useEffect, etc.)
+- When you need browser-only APIs (localStorage, navigator, etc.)
+- For browser-specific features (animations, scroll-based effects)
+- For third-party libraries that rely on client-side functionality
+
+## Client Component Implementation
+
+```tsx
+'use client' // This directive must be at the top of the file
+
+import { useState } from 'react';
+
+export function Counter({ initialCount = 0 }) {
+  const [count, setCount] = useState(initialCount);
+  
+  return (
+    <div>
+      <p>Count: {count}</p>
+      <button onClick={() => setCount(count + 1)}>Increment</button>
+      <button onClick={() => setCount(count - 1)}>Decrement</button>
+    </div>
+  );
+}
+```
+
+## State Management
+
+- Use React's built-in hooks for component-specific state
+- Consider React Context for state sharing across components
+- For more complex state needs, use lightweight libraries like Zustand or Jotai
+- Avoid Redux or other heavyweight solutions unless absolutely necessary
+- Structure state logically, keeping related data together
+
+## Performance Optimization
+
+- Use React.memo for components that render often but rarely change
+- Implement proper dependency arrays in useEffect, useMemo, and useCallback
+- Avoid unnecessary re-renders by keeping state granular
+- Use dynamic imports for code splitting: `const Component = dynamic(() => import('./Component'))`
+- Implement virtualization for long lists (react-window or react-virtualized)
+
+## Data Fetching Patterns
+
+- Use SWR or TanStack Query for data fetching with caching and revalidation
+- Implement loading states and error handling
+- Consider optimistic updates for better UX
+- Coordinate with Server Actions for data mutations
+
+## Client-Server Interaction
+
+- Receive props from Server Components (one-way data flow)
+- Use Server Actions for server-side mutations
+- Understand hydration and how SSR affects client components
+- Handle the "flash of unstyled/unwrapped content" with proper suspense fallbacks
+
+## Form Handling
+
+- Use React 19's enhanced form elements with Server Actions
+- Implement proper form validation (client-side for UX, server-side for security)
+- Consider using libraries like React Hook Form for complex forms
+- Implement optimistic UI updates for a better user experience
+
+## Accessibility Considerations
+
+- Use semantic HTML elements
+- Implement proper ARIA attributes
+- Ensure keyboard navigation works correctly
+- Test with screen readers and accessibility tools
+
+By following these principles, you'll create efficient, performant client components that enhance the user experience while minimizing unnecessary JavaScript.

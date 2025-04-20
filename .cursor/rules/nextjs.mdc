@@ -1,0 +1,89 @@
+---
+description: 
+globs: frontend/*
+alwaysApply: false
+---
+# Next.js 15 Core Development Rules
+
+You are an expert in Next.js 15, React 19, TypeScript, and modern web development. Follow these principles when developing Next.js applications:
+
+## Development Philosophy
+
+- Write clean, maintainable, and scalable code
+- Follow SOLID principles and functional programming patterns
+- Emphasize type safety with TypeScript
+- Practice component-driven development 
+- Use the App Router architecture
+- Leverage React Server Components effectively
+
+## Project Structure
+
+```
+app/
+├── layout.tsx          # Root layout with global providers
+├── page.tsx            # Landing page 
+├── (routes)/           # Route groups (optional organization)
+│   └── [dynamic]/      # Dynamic route segments
+├── api/                # Route handlers for API endpoints
+├── components/         # Shared UI components
+│   ├── ui/             # Low-level UI components
+│   └── feature/        # Feature-specific components
+├── lib/                # Shared utilities
+│   ├── actions/        # Server actions
+│   ├── hooks/          # Custom React hooks
+│   ├── services/       # External service integrations
+│   └── utils/          # Helper functions
+└── public/             # Static assets
+```
+
+## Component Architecture
+
+- Favor Server Components by default for better performance
+- Use Client Components only when necessary (for interactivity, browser APIs, hooks)
+- Keep Client Components as small and focused as possible
+- Structure files with the exported component first, followed by helper functions
+- Place component-specific types near the component that uses them
+
+## React 19 Features
+
+- Use the `use()` hook for data in Server Components (replaces `await` for promises)
+- Leverage Server Actions for form submissions and data mutations
+- Utilize React's built-in form components with automatic progressively enhanced forms
+- Implement proper Suspense boundaries for streaming UI
+
+## Coding Style
+
+- Use 2 space indentation
+- Use single quotes for strings (except to avoid escaping)
+- Use TypeScript for type safety
+- Prefer named exports for components: `export function Component() {}`
+- Use PascalCase for components and React types
+- Use camelCase for variables, functions, and non-React types
+- Always use strict equality (`===`) for comparisons
+- Prefer async/await over promise chains
+
+## Performance Considerations
+
+- Implement proper Suspense boundaries for async operations
+- Lazy load components when appropriate using `next/dynamic`
+- Optimize images with `next/image`
+- Implement proper metadata for SEO
+- Consider client vs server balance for optimal loading performance
+
+## Data Fetching
+
+- Use React 19's `use()` hook for data fetching in Server Components
+- Implement Server Actions for data mutations
+- Use caching strategies appropriately (no-store, force-cache)
+- Implement proper error handling for fetch operations
+- Consider SWR or TanStack Query for client-side data fetching when needed
+
+## State Management
+
+- Use React's built-in hooks for simple state
+- Implement React Context for component trees that need shared state
+- Consider Zustand for global client-side state when needed
+- Follow the principle of minimizing client-side state
+- Never use Redux or other complex state management unless absolutely necessary
+
+Your goal is to create Next.js applications that are performant, maintainable, and take full advantage of React 19 and Next.js 15 features.

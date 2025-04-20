@@ -1,0 +1,86 @@
+---
+description: 
+globs: *.tsx
+alwaysApply: false
+---
+# React Server Components Best Practices
+
+You are an expert in React 19 Server Components within Next.js 15 applications. Follow these guidelines for effective use of Server Components:
+
+## Core Principles
+
+- Use Server Components by default and only switch to Client Components when necessary
+- Server Components render only on the server and their code is never shipped to the client
+- Server Components can directly access backend resources (database, filesystems, etc.)
+- Server Components cannot use hooks, event handlers, or browser APIs
+
+## When to Use Server Components
+
+- Data fetching (directly from databases or APIs)
+- Accessing backend resources and sensitive information
+- Large dependencies (keep them server-side)
+- Components with no interactive elements
+- SEO-critical content that needs to be immediately available
+
+## Server Component Implementation
+
+```tsx
+// This is a Server Component (default in App Router)
+export default async function ProductList() {
+  // Can fetch data directly without useEffect/useState
+  const products = await fetch('https://api.example.com/products')
+    .then(res => res.json());
+
+  return (
+    <div>
+      <h1>Products</h1>
+      <ul>
+        {products.map(product => (
+          <li key={product.id}>
+            {product.name} - ${product.price}
+            {/* Client Component for interactive elements */}
+            <AddToCartButton productId={product.id} />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+```
+
+## Data Fetching in Server Components
+
+- Use native `fetch()` with proper caching options
+- Use the `use()` hook (React 19) for promise handling
+- Implement proper error boundaries around async operations
+- Consider revalidation requirements (static vs dynamic data)
+
+## Passing Data to Client Components
+
+- Server Components can pass data as props to Client Components
+- Pass only the necessary data to minimize client-side JS
+- Use serializable props (objects that can be stringified)
+- Consider data granularity to optimize performance
+
+## Server Component Composition
+
+- Keep Server Component trees as large as possible before introducing Client Components
+- Interleave Server and Client Components when necessary
+- Use the "leaf" pattern - Client Components at the leaves of your component tree
+- Avoid importing Server Components into Client Components (they can only be passed as props)
+
+## Special Considerations
+
+- Remember that Server Components render once at request or build time
+- They don't re-render on state changes or prop updates
+- Always properly handle loading states with Suspense
+- Use TypeScript for better type checking between server and client boundaries
+
+## Common Patterns
+
+- Data fetching in layout components for shared data
+- Moving interactive elements to Client Component "islands"
+- Using Server Actions for form processing and data mutations
+- Implementing progressive enhancement with Server Components + Client hydration
+
+Remember: The goal is to minimize JavaScript sent to the client while providing optimal performance and user experience.
