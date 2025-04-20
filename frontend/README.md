@@ -20,6 +20,79 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
+## Integration with Calendar Backend
+
+This frontend application interacts with a backend calendar integration service that finds overlapping availability across multiple scheduling links (Calendly and Google Calendar) and creates events.
+
+### Required Frontend Components
+
+1. **Calendar Link Input Form**:
+   - Allow users to input multiple calendar links
+   - Support for both Calendly and Google Calendar links
+   - Option to specify desired meeting duration
+
+2. **Availability Display**:
+   - Show overlapping time slots from all calendar links
+   - Display participant information derived from links
+   - Enable selection of a preferred time slot
+
+3. **Event Creation Form**:
+   - Fields for event title, description, and location
+   - Participant selection/confirmation
+   - Submit button to create the event
+
+### Backend API Integration
+
+The frontend should integrate with these backend endpoints:
+
+1. **Find Overlapping Availability**:
+   - Endpoint: `POST /api/calendar/process`
+   - Request Body:
+     ```json
+     {
+       "links": [
+         {"type": "calendly", "url": "https://calendly.com/user/slot"},
+         {"type": "google", "url": "https://calendar.google.com/..."}
+       ],
+       "duration_minutes": 30 // Optional
+     }
+     ```
+   - Response: List of overlapping time slots and participant details
+
+2. **Create Calendar Event**:
+   - Endpoint: `POST /api/calendar/create-event`
+   - Request Body:
+     ```json
+     {
+       "slot": {
+         "start": "2023-05-01T14:00:00Z",
+         "end": "2023-05-01T15:00:00Z"
+       },
+       "title": "Meeting Title",
+       "description": "Meeting description",
+       "location": "Virtual",
+       "participants": [
+         {"email": "user1@example.com", "name": "User 1"},
+         {"email": "user2@example.com", "name": "User 2"}
+       ]
+     }
+     ```
+   - Response: Details of the created event (ID, link, status)
+
+### Authentication Requirements
+
+The application needs to handle:
+- Google OAuth for calendar access (redirects to Google's auth flow)
+- Storing and refreshing tokens as needed
+
+### Error Handling
+
+The frontend should gracefully handle:
+- Failed API requests
+- No overlapping availability
+- Authentication failures
+- Service-specific errors (e.g., Calendly API issues)
+
 ## Learn More
 
 To learn more about Next.js, take a look at the following resources:
