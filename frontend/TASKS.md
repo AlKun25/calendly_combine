@@ -6,10 +6,9 @@ Based on the `frontend_mvp_plan.txt`.
 
 - [x] Set up Next.js 15 project with App Router
 - [x] Integrate Tailwind CSS
-- [ ] Integrate Shadcn/UI (Button, Card, Form, Input, Toast)
-- [ ] Set up Clerk for authentication
-- [ ] Implement Google OAuth sign-in flow (`app/(auth)/sign-in/page.tsx`)
-- [ ] Configure Clerk middleware for route protection (`middleware.ts`)
+- [x] Set up Clerk for authentication
+- [x] Implement Google OAuth sign-in flow (`app/(auth)/sign-in/page.tsx`)
+- [x] Configure Clerk middleware for route protection (`middleware.ts`)
 - [ ] Configure tsconfig.json based on best practices (strict mode, paths)
 - [ ] Create token retrieval utility (`lib/api/clerk.ts`)
 - [ ] Create simple landing page (`app/page.tsx`)
