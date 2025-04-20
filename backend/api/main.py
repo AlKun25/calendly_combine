@@ -15,6 +15,7 @@ from core.overlap_engine import OverlapProcessor
 from adapters.calendly import CalendlyAdapter
 from adapters.google_calendar import GoogleCalendarAdapter
 from adapters.output.link_generator import OutputFormat, OutputLinkGenerator
+from api.event_endpoints import router as event_router
 
 
 # Configure logging
@@ -45,6 +46,7 @@ class OutputFormatType(str, Enum):
     """Enum for output format types in the API."""
     CALENDLY = "calendly"
     LETTUCEMEET = "lettucemeet"
+    GOOGLE = "google"
 
 
 class CalendarLink(BaseModel):
@@ -80,3 +82,5 @@ async def process_calendar_links(input_data: CalendarLinkInput):
     """Process multiple calendar links to find overlapping availability."""
     # TODO: Implement calendar link processing
     pass
+
+app.include_router(event_router)

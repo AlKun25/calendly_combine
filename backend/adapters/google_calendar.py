@@ -1,95 +1,208 @@
-"""Google Calendar adapter for extracting availability information.
+"""Google Calendar adapter for extracting availability and creating events.
 
-This module provides functionality to extract availability information from
-Google Calendar appointment booking links using the Google Calendar API.
+This module provides functionality to interact with the Google Calendar API,
+including extracting availability information and creating calendar events.
 """
 
-import re
 import logging
 import os
-from typing import Optional, List, Dict, Any
+import re
+from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta, timezone
-import uuid
 
 import httpx
-from dotenv import load_dotenv
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
 
-from core.models import AvailabilitySchedule, TimeSlot, CalendarType
-
+from core.models import (
+    AvailabilitySchedule, TimeSlot, CalendarType, 
+    CalendarEvent, EventConfirmation
+)
+from adapters.base import (
+    BaseAdapter, AuthenticationError, 
+    ResourceNotFoundError, EventCreationError
+)
 
 # Configure module logger
 logger = logging.getLogger(__name__)
 
-# Load environment variables
-load_dotenv()
+# Google Calendar API scopes
+SCOPES = ['https://www.googleapis.com/auth/calendar']
 
 
-class GoogleCalendarAdapterError(Exception):
-    """Base exception for Google Calendar adapter errors."""
-    pass
-
-
-class GoogleCalendarAuthenticationError(GoogleCalendarAdapterError):
-    """Raised when authentication with Google Calendar API fails."""
-    pass
-
-
-class GoogleCalendarResourceNotFoundError(GoogleCalendarAdapterError):
-    """Raised when a requested resource is not found."""
-    pass
-
-
-class GoogleCalendarAdapter:
-    """Adapter for extracting availability information from Google Calendar appointment booking links.
+class GoogleCalendarAdapter(BaseAdapter):
+    """Adapter for interacting with Google Calendar.
     
-    This adapter specifically works with Google Calendar appointment booking links
-    to extract available time slots.
+    This adapter provides functionality to:
+    1. Extract availability from Google Calendar links
+    2. Create events in Google Calendar
+    
+    Attributes:
+        credentials_path: Path to the Google API credentials file
+        token_path: Path to store the authentication token
+        api_key: Optional API key for requests that don't require OAuth
     """
     
-    # Regex patterns to extract calendar ID and appointment type from booking links
-    # Example link 1: https://calendar.google.com/calendar/appointments/schedules/AcZssZ1jV8GgRRtlcn9q_xMsTJ88INhKGbqnQFc5K5o=?gv=true
-    # Example link 2: https://calendar.app.google/23KAW1E3SpHgCoEPA
+    # Regex patterns to extract calendar ID from links
     BOOKING_LINK_PATTERN_LEGACY = r'calendar/appointments/schedules/([^/\?]+)'
     BOOKING_LINK_PATTERN_NEW = r'calendar\.app\.google/([A-Za-z0-9]+)'
     
-    # Google Calendar API base URL
+    # Google Calendar API base URLs
     API_BASE_URL = "https://www.googleapis.com/calendar/v3"
     BOOKING_API_BASE_URL = "https://calendar-pa.clients6.google.com/v1/calendar"
     
     def __init__(
         self, 
+        credentials_path: Optional[str] = None, 
+        token_path: Optional[str] = None,
         api_key: Optional[str] = None
     ):
         """Initialize the Google Calendar adapter.
         
         Args:
-            api_key: Optional Google Calendar API key.
-                If not provided, will try to load from GOOGLE_API_KEY env var.
+            credentials_path: Path to the Google API credentials file
+            token_path: Path to store the authentication token
+            api_key: Optional Google Calendar API key for non-OAuth requests
         """
+        self.credentials_path = credentials_path or os.getenv("GOOGLE_CREDENTIALS_PATH")
+        self.token_path = token_path or os.getenv("GOOGLE_TOKEN_PATH", "token.json")
         self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
+        self._credentials = None
+        self._service = None
+        self._http_client = None
         
-        # Set up HTTP client
-        self.http_client = httpx.Client(
-            timeout=10.0,
-            transport=httpx.HTTPTransport(retries=3)
-        )
-        
-        logger.info("Initialized Google Calendar adapter")
+        # Try to load existing credentials
+        self._load_credentials()
     
-    def extract_availability(self, booking_link: str) -> AvailabilitySchedule:
-        """Extract availability information from a Google Calendar appointment booking link.
+    @property
+    def http_client(self) -> httpx.Client:
+        """Get or create the HTTP client for API requests.
+        
+        Returns:
+            Configured HTTP client
+        """
+        if not self._http_client:
+            self._http_client = httpx.Client(
+                timeout=10.0,
+                transport=httpx.HTTPTransport(retries=3)
+            )
+                
+        return self._http_client
+    
+    def _load_credentials(self) -> None:
+        """Load Google API credentials from file or refresh token."""
+        if os.path.exists(self.token_path):
+            try:
+                with open(self.token_path, "r") as token:
+                    self._credentials = Credentials.from_authorized_user_info(
+                        eval(token.read()), SCOPES
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to load token: {e}")
+                self._credentials = None
+        
+        # If credentials exist but expired, refresh them
+        if self._credentials and self._credentials.expired and self._credentials.refresh_token:
+            try:
+                self._credentials.refresh(Request())
+                self._save_credentials()
+            except Exception as e:
+                logger.warning(f"Failed to refresh token: {e}")
+                self._credentials = None
+    
+    def _save_credentials(self) -> None:
+        """Save the current credentials to the token file."""
+        if not self._credentials:
+            return
+            
+        # Save credentials to the file
+        with open(self.token_path, "w") as token:
+            token.write(str(self._credentials.to_json()))
+    
+    def authenticate(self, credentials: Dict[str, Any] = None) -> bool:
+        """Authenticate with Google Calendar API.
         
         Args:
-            booking_link: The Google Calendar appointment booking link.
+            credentials: Optional credentials dict if not using file
             
         Returns:
-            An AvailabilitySchedule object with the extracted time slots.
+            True if authentication was successful
             
         Raises:
-            ValueError: If the Google Calendar link format is invalid.
-            GoogleCalendarResourceNotFoundError: If the appointment schedule cannot be found.
-            GoogleCalendarAdapterError: For other Google Calendar-specific errors.
-            httpx.HTTPError: For network or HTTP errors.
+            AuthenticationError: If authentication fails
+        """
+        try:
+            # If already authenticated, return True
+            if self.is_authenticated():
+                return True
+                
+            # If credentials provided directly, use them
+            if credentials and 'token' in credentials:
+                self._credentials = Credentials(
+                    token=credentials.get('token'),
+                    refresh_token=credentials.get('refresh_token'),
+                    client_id=credentials.get('client_id'),
+                    client_secret=credentials.get('client_secret'),
+                    scopes=SCOPES,
+                    token_uri='https://oauth2.googleapis.com/token'
+                )
+                self._save_credentials()
+                return self.is_authenticated()
+            
+            # Otherwise, use credentials file
+            if not self.credentials_path or not os.path.exists(self.credentials_path):
+                raise AuthenticationError("No credentials file found")
+                
+            flow = InstalledAppFlow.from_client_secrets_file(
+                self.credentials_path, SCOPES
+            )
+            self._credentials = flow.run_local_server(port=0)
+            self._save_credentials()
+            
+            return self.is_authenticated()
+        except Exception as e:
+            logger.error(f"Google Calendar authentication failed: {e}")
+            raise AuthenticationError(f"Google Calendar authentication failed: {e}") from e
+    
+    def is_authenticated(self) -> bool:
+        """Check if authenticated with Google Calendar API.
+        
+        Returns:
+            True if authenticated, False otherwise
+        """
+        if not self._credentials:
+            return False
+            
+        # If credentials exist but expired and can't be refreshed, consider not authenticated
+        if self._credentials.expired and not self._credentials.refresh_token:
+            return False
+            
+        # Initialize service if needed
+        if not self._service:
+            try:
+                self._service = build('calendar', 'v3', credentials=self._credentials)
+            except Exception as e:
+                logger.error(f"Failed to build Google Calendar service: {e}")
+                return False
+                
+        return True
+    
+    def extract_availability(self, booking_link: str) -> AvailabilitySchedule:
+        """Extract availability information from a Google Calendar booking link.
+        
+        Args:
+            booking_link: The Google Calendar booking link
+            
+        Returns:
+            An AvailabilitySchedule with the extracted time slots
+            
+        Raises:
+            ValueError: If the link format is invalid
+            ResourceNotFoundError: If the booking schedule cannot be found
+            AuthenticationError: If authentication with the API fails
+            EventCreationError: For other API or parsing errors
         """
         logger.info(f"Extracting availability from Google Calendar booking link: {booking_link}")
         
@@ -130,27 +243,24 @@ class GoogleCalendarAdapter:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 logger.error(f"Appointment schedule not found: {e}")
-                raise GoogleCalendarResourceNotFoundError(f"Appointment schedule not found: {e}") from e
+                raise ResourceNotFoundError(f"Appointment schedule not found: {e}") from e
             elif e.response.status_code == 401 or e.response.status_code == 403:
                 logger.error(f"Authentication failed with Google Calendar API: {e}")
-                raise GoogleCalendarAuthenticationError("Authentication failed with Google Calendar API") from e
+                raise AuthenticationError("Authentication failed with Google Calendar API") from e
             else:
                 logger.error(f"HTTP error during Google Calendar API request: {e}")
-                raise GoogleCalendarAdapterError(f"Google Calendar API error: {e}") from e
+                raise EventCreationError(f"Google Calendar API error: {e}") from e
                 
         except httpx.HTTPError as e:
             logger.error(f"HTTP error during Google Calendar API request: {e}")
-            raise
+            raise EventCreationError(f"Google Calendar API error: {e}") from e
             
         except Exception as e:
             logger.error(f"Error extracting availability from Google Calendar: {e}")
-            raise GoogleCalendarAdapterError(f"Error extracting availability: {e}") from e
+            raise EventCreationError(f"Error extracting availability: {e}") from e
     
     def _extract_schedule_id(self, booking_link: str) -> str:
         """Extract schedule ID from a Google Calendar booking link.
-        
-        Supports both legacy format (calendar.google.com/calendar/appointments/...)
-        and new shortlink format (calendar.app.google/...).
         
         Args:
             booking_link: The Google Calendar booking link to extract from.
@@ -223,8 +333,8 @@ class GoogleCalendarAdapter:
             Dictionary with schedule information.
             
         Raises:
-            GoogleCalendarResourceNotFoundError: If the schedule doesn't exist.
-            GoogleCalendarAuthenticationError: If authentication fails.
+            ResourceNotFoundError: If the schedule doesn't exist.
+            AuthenticationError: If authentication fails.
             httpx.HTTPError: If there's an error communicating with the API.
         """
         logger.debug(f"Getting schedule info for {schedule_id}")
@@ -247,10 +357,10 @@ class GoogleCalendarAdapter:
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 logger.error(f"Schedule not found: {schedule_id}")
-                raise GoogleCalendarResourceNotFoundError(f"Schedule not found: {schedule_id}")
+                raise ResourceNotFoundError(f"Schedule not found: {schedule_id}")
             elif e.response.status_code in (401, 403):
                 logger.error(f"Authentication failed for schedule: {schedule_id}")
-                raise GoogleCalendarAuthenticationError(f"Authentication failed for schedule: {schedule_id}")
+                raise AuthenticationError(f"Authentication failed for schedule: {schedule_id}")
             else:
                 logger.error(f"HTTP error getting schedule info: {e}")
                 raise
@@ -281,7 +391,7 @@ class GoogleCalendarAdapter:
             List of TimeSlot objects representing available times.
             
         Raises:
-            GoogleCalendarAdapterError: If there's an error getting availability data.
+            EventCreationError: If there's an error getting availability data.
         """
         logger.debug(f"Getting available slots for schedule {schedule_id}")
         
@@ -347,7 +457,7 @@ class GoogleCalendarAdapter:
             
         except httpx.HTTPError as e:
             logger.error(f"Error getting available slots: {e}")
-            raise GoogleCalendarAdapterError(f"Error getting available slots: {e}") from e
+            raise EventCreationError(f"Error getting available slots: {e}") from e
             
         except Exception as e:
             logger.error(f"Unexpected error getting available slots: {e}")
@@ -436,3 +546,68 @@ class GoogleCalendarAdapter:
             logger.error(f"Alternative method failed: {e}")
             # Return empty list as last resort
             return []
+
+    def create_event(self, event: CalendarEvent) -> EventConfirmation:
+        """Create an event in Google Calendar.
+        
+        Args:
+            event: The event to create
+            
+        Returns:
+            Confirmation details for the created event
+            
+        Raises:
+            AuthenticationError: If not authenticated
+            EventCreationError: If event creation fails
+        """
+        if not self.is_authenticated():
+            raise AuthenticationError("Not authenticated with Google Calendar")
+        
+        # Convert CalendarEvent to Google Calendar event format
+        calendar_id = 'primary'
+        if event.organizer:
+            calendar_id = event.organizer
+        
+        attendees = []
+        for participant in event.participants:
+            attendee = {'email': participant.email}
+            if participant.name:
+                attendee['displayName'] = participant.name
+            attendees.append(attendee)
+        
+        # Create the event
+        google_event = {
+            'summary': event.title,
+            'description': event.description or '',
+            'start': {
+                'dateTime': event.start_time.isoformat(),
+                'timeZone': event.timezone,
+            },
+            'end': {
+                'dateTime': event.end_time.isoformat(),
+                'timeZone': event.timezone,
+            },
+            'attendees': attendees,
+        }
+        
+        # Add location if specified
+        if event.location:
+            google_event['location'] = event.location
+        
+        try:
+            created_event = self._service.events().insert(
+                calendarId=calendar_id,
+                body=google_event,
+                sendUpdates='all'  # Send emails to attendees
+            ).execute()
+            
+            return EventConfirmation(
+                event_id=created_event['id'],
+                calendar_link=created_event['htmlLink'],
+                event=event,
+                status=created_event['status'],
+                provider=CalendarType.GOOGLE
+            )
+        except Exception as e:
+            logger.error(f"Failed to create Google Calendar event: {e}")
+            raise EventCreationError(f"Failed to create Google Calendar event: {e}") from e

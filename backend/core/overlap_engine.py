@@ -12,7 +12,10 @@ for finding overlaps.
 import logging
 from typing import List, Set, Optional
 from datetime import datetime
-from core.models import TimeSlot, AvailabilitySchedule
+from core.models import (
+    TimeSlot, AvailabilitySchedule, CalendarEvent, 
+    EventParticipant
+)
 
 
 # Configure module logger
@@ -90,6 +93,46 @@ class OverlapProcessor:
             f"Found {len(merged_results)} overlapping slots across all schedules"
         )
         return merged_results
+    
+    def create_calendar_event(
+        self, 
+        selected_slot: TimeSlot, 
+        title: str,
+        participants: List[EventParticipant],
+        description: Optional[str] = None,
+        organizer: Optional[str] = None,
+        location: Optional[str] = None
+    ) -> CalendarEvent:
+        """Create a calendar event from a selected time slot.
+        
+        Args:
+            selected_slot: The selected time slot
+            title: Title for the event
+            participants: List of participants to invite
+            description: Optional description for the event
+            organizer: Optional email of the event organizer
+            location: Optional location for the event
+            
+        Returns:
+            A CalendarEvent instance
+            
+        Raises:
+            ValueError: If the selected slot is invalid
+        """
+        # Validate the selected slot
+        if not selected_slot:
+            raise ValueError("No time slot selected")
+        
+        logger.info(f"Creating calendar event from selected time slot: {title}")
+        
+        return CalendarEvent.from_time_slot(
+            time_slot=selected_slot,
+            title=title,
+            participants=participants,
+            description=description,
+            organizer=organizer,
+            location=location
+        )
     
     def _find_pairwise_overlaps(
         self, slots1: Set[TimeSlot], slots2: Set[TimeSlot]

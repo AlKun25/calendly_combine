@@ -1,4 +1,8 @@
-"""Calendly adapter for extracting availability information."""
+"""Calendly adapter for extracting availability and creating events.
+
+This module provides functionality to interact with the Calendly API,
+including extracting availability information and creating events.
+"""
 
 import re
 import logging
@@ -9,8 +13,14 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from dotenv import load_dotenv
 
-from core.models import AvailabilitySchedule, TimeSlot, CalendarType
-
+from core.models import (
+    AvailabilitySchedule, TimeSlot, CalendarType, 
+    CalendarEvent, EventConfirmation
+)
+from adapters.base import (
+    BaseAdapter, AuthenticationError, 
+    ResourceNotFoundError, EventCreationError
+)
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -19,34 +29,19 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 
-class CalendlyAdapterError(Exception):
-    """Base exception for Calendly adapter errors."""
-    pass
-
-
-class CalendlyAuthenticationError(CalendlyAdapterError):
-    """Raised when authentication with Calendly API fails."""
-    pass
-
-
-class CalendlyResourceNotFoundError(CalendlyAdapterError):
-    """Raised when a requested resource is not found."""
-    pass
-
-
-class CalendlyAdapter:
-    """Adapter for extracting availability information from Calendly links.
+class CalendlyAdapter(BaseAdapter):
+    """Adapter for interacting with Calendly.
     
-    This adapter uses Calendly's API v2 to extract availability information
-    from a Calendly user link. It supports both authenticated API mode and
-    a fallback mock mode for development/testing purposes.
+    This adapter provides functionality to:
+    1. Extract availability information from Calendly links
+    2. Create single-use scheduling links
     
     Attributes:
-        api_key (Optional[str]): Calendly API key for authenticated requests.
-        mock_mode (bool): Whether the adapter is operating in mock mode.
-        slot_duration (int): Duration of time slots in minutes.
-        days_to_check (int): Number of days to check for availability.
-        http_client (httpx.Client): HTTP client for API requests.
+        api_key: Calendly API key for authenticated requests
+        mock_mode: Whether the adapter is operating in mock mode
+        slot_duration: Duration of time slots in minutes
+        days_to_check: Number of days to check for availability
+        http_client: HTTP client for API requests
     """
     
     # Regex pattern to extract user name from Calendly links
@@ -85,22 +80,85 @@ class CalendlyAdapter:
         self.mock_mode = mock_mode or not self.api_key
         self.slot_duration = slot_duration
         self.days_to_check = days_to_check
+        self._http_client = None
         
         if self.mock_mode:
             logger.info("Calendly adapter running in mock mode")
+
+    @property
+    def http_client(self) -> httpx.Client:
+        """Get or create the HTTP client for API requests.
         
-        # Create HTTP client with appropriate timeout and retries
-        self.http_client = httpx.Client(
-            timeout=10.0,
-            transport=httpx.HTTPTransport(retries=3)
-        )
+        Returns:
+            Configured HTTP client
+        """
+        if not self._http_client:
+            self._http_client = httpx.Client(
+                timeout=10.0,
+                transport=httpx.HTTPTransport(retries=3)
+            )
+            
+            # Set up authorization headers if API key is available
+            if self.api_key:
+                self._http_client.headers.update({
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                })
+                
+        return self._http_client
+    
+    def authenticate(self, credentials: Optional[Dict[str, Any]] = None) -> bool:
+        """Authenticate with Calendly API.
         
-        # Set up authorization headers if API key is available
-        if self.api_key:
-            self.http_client.headers.update({
+        Args:
+            credentials: Optional credentials dict with 'api_key'
+            
+        Returns:
+            True if authentication was successful
+            
+        Raises:
+            AuthenticationError: If authentication fails
+        """
+        if credentials and 'api_key' in credentials:
+            self.api_key = credentials['api_key']
+        
+        if not self.api_key:
+            raise AuthenticationError("No Calendly API key provided")
+        
+        # Test the API key by making a request to get current user
+        try:
+            url = f"{self.API_BASE_URL}/users/me"
+            headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
-            })
+            }
+            
+            response = httpx.get(url, headers=headers)
+            response.raise_for_status()
+            
+            # Update HTTP client headers if needed
+            if self._http_client:
+                self._http_client.headers.update(headers)
+            else:
+                # Create client if it doesn't exist
+                self._http_client = httpx.Client(
+                    timeout=10.0,
+                    transport=httpx.HTTPTransport(retries=3),
+                    headers=headers
+                )
+                
+            return True
+        except Exception as e:
+            logger.error(f"Calendly authentication failed: {e}")
+            raise AuthenticationError(f"Calendly authentication failed: {e}") from e
+    
+    def is_authenticated(self) -> bool:
+        """Check if authenticated with Calendly API.
+        
+        Returns:
+            True if API key is available, False otherwise
+        """
+        return bool(self.api_key) and not self.mock_mode
 
     def extract_availability(self, calendly_link: str) -> AvailabilitySchedule:
         """Extract availability information from a Calendly link.
@@ -108,24 +166,18 @@ class CalendlyAdapter:
         This method accepts a Calendly user link and extracts the available 
         time slots by querying the Calendly API or generating mock data.
         
-        The method performs the following steps:
-        1. Extracts the user information from the link
-        2. Gets the user's availability schedules
-        3. Gets the user's busy times for the next N days
-        4. Calculates available slots based on working hours minus busy times
-        
         Args:
             calendly_link: A valid Calendly user link in the format 
                         'https://calendly.com/username'
                 
-        Returns'
+        Returns:
             An AvailabilitySchedule object containing available time slots.
                 
         Raises:
             ValueError: If the Calendly link format is invalid.
-            CalendlyAuthenticationError: If authentication fails.
-            CalendlyResourceNotFoundError: If the user doesn't exist.
-            CalendlyAdapterError: For other Calendly-specific errors.
+            AuthenticationError: If authentication fails.
+            ResourceNotFoundError: If the user doesn't exist.
+            BaseAdapterError: For other Calendly-specific errors.
             httpx.HTTPError: For network or HTTP errors.
         """
         # Validate input
@@ -148,7 +200,7 @@ class CalendlyAdapter:
             
             if not user_uri:
                 logger.warning(f"Could not find user with name: {user_name}")
-                raise CalendlyResourceNotFoundError(f"Could not find user with name: {user_name}")
+                raise ResourceNotFoundError(f"Could not find user with name: {user_name}")
             
             # Create availability schedule
             schedule = AvailabilitySchedule(
@@ -174,17 +226,17 @@ class CalendlyAdapter:
                 logger.error(f"Authentication failed with Calendly API: {e}")
                 if not self.mock_mode:
                     return self._create_mock_schedule(user_name)
-                raise CalendlyAuthenticationError("Authentication failed with Calendly API") from e
+                raise AuthenticationError("Authentication failed with Calendly API") from e
             elif e.response.status_code == 404:
                 logger.error(f"Resource not found: {e}")
                 if not self.mock_mode:
                     return self._create_mock_schedule(user_name)
-                raise CalendlyResourceNotFoundError(f"Resource not found: {e}") from e
+                raise ResourceNotFoundError(f"Resource not found: {e}") from e
             else:
                 logger.error(f"HTTP error during Calendly API request: {e}")
                 if not self.mock_mode:
                     return self._create_mock_schedule(user_name)
-                raise CalendlyAdapterError(f"Calendly API error: {e}") from e
+                raise EventCreationError(f"Calendly API error: {e}") from e
                 
         except httpx.HTTPError as e:
             logger.error(f"HTTP error during Calendly API request: {e}")
@@ -202,7 +254,7 @@ class CalendlyAdapter:
             if not self.mock_mode:
                 logger.info("Falling back to mock mode after error")
                 return self._create_mock_schedule(user_name)
-            raise CalendlyAdapterError(f"Error extracting availability: {e}") from e
+            raise EventCreationError(f"Error extracting availability: {e}") from e
 
     def _extract_user_info(self, calendly_link: str) -> str:
         """Extract user name from a Calendly link.
@@ -232,8 +284,8 @@ class CalendlyAdapter:
             User data from the Calendly API or mock data if in mock mode.
             
         Raises:
-            CalendlyResourceNotFoundError: If the user could not be found.
-            CalendlyAuthenticationError: If authentication fails.
+            ResourceNotFoundError: If the user could not be found.
+            AuthenticationError: If authentication fails.
             httpx.HTTPError: If there's an error communicating with the API.
         """
         if self.mock_mode:
@@ -261,7 +313,7 @@ class CalendlyAdapter:
             
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
-                raise CalendlyAuthenticationError("Authentication failed") from e
+                raise AuthenticationError("Authentication failed") from e
             if e.response.status_code == 404:
                 logger.warning(f"Failed to find user by name, trying direct UUID: {e}")
             else:
@@ -288,7 +340,7 @@ class CalendlyAdapter:
             List of TimeSlot objects representing available times.
             
         Raises:
-            CalendlyAdapterError: If there's an error getting availability data.
+            EventCreationError: If there's an error getting availability data.
         """
         logger.debug(f"Getting available slots for {user_uri}")
         
@@ -495,3 +547,92 @@ class CalendlyAdapter:
             f"Created mock schedule for {user_name} with {len(mock_slots)} time slots"
         )
         return schedule
+
+    def create_event(self, event: CalendarEvent) -> EventConfirmation:
+        """Create a single-use scheduling link in Calendly.
+        
+        Args:
+            event: The event to create
+            
+        Returns:
+            Confirmation details with the scheduling link
+            
+        Raises:
+            AuthenticationError: If not authenticated
+            EventCreationError: If link creation fails
+        """
+        if not self.is_authenticated():
+            raise AuthenticationError("Not authenticated with Calendly")
+        
+        # First, get the user data to find event types
+        try:
+            user_response = self.http_client.get(f"{self.API_BASE_URL}/users/me")
+            user_response.raise_for_status()
+            user_data = user_response.json()
+            user_uri = user_data.get("resource", {}).get("uri")
+            
+            if not user_uri:
+                raise EventCreationError("Failed to get user data from Calendly")
+            
+            # Get event types for the user
+            event_types_url = f"{self.API_BASE_URL}/event_types"
+            event_types_params = {"user": user_uri}
+            
+            event_types_response = self.http_client.get(
+                event_types_url, params=event_types_params
+            )
+            event_types_response.raise_for_status()
+            event_types_data = event_types_response.json()
+            
+            # Find an appropriate event type based on duration
+            event_duration_minutes = int((event.end_time - event.start_time).total_seconds() / 60)
+            
+            selected_event_type = None
+            for event_type in event_types_data.get("collection", []):
+                duration = event_type.get("duration")
+                if duration and duration == event_duration_minutes:
+                    selected_event_type = event_type
+                    break
+            
+            if not selected_event_type:
+                # Use the first available event type as fallback
+                if event_types_data.get("collection"):
+                    selected_event_type = event_types_data["collection"][0]
+                else:
+                    raise EventCreationError("No event types found for Calendly user")
+            
+            # Create a single-use scheduling link
+            event_type_uri = selected_event_type["uri"]
+            
+            single_use_url = f"{self.API_BASE_URL}/scheduling_links"
+            single_use_data = {
+                "max_event_count": 1,
+                "owner": user_uri,
+                "owner_type": "users",
+                "event_type": event_type_uri
+            }
+            
+            single_use_response = self.http_client.post(
+                single_use_url, json=single_use_data
+            )
+            single_use_response.raise_for_status()
+            single_use_data = single_use_response.json()
+            
+            scheduling_link = single_use_data.get("resource", {}).get("booking_url")
+            
+            if not scheduling_link:
+                raise EventCreationError("Failed to create Calendly scheduling link")
+            
+            return EventConfirmation(
+                event_id=single_use_data.get("resource", {}).get("uuid", ""),
+                calendar_link=scheduling_link,
+                event=event,
+                status="created",
+                provider=CalendarType.CALENDLY
+            )
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Calendly API error: {e}")
+            raise EventCreationError(f"Calendly API error: {e}") from e
+        except Exception as e:
+            logger.error(f"Failed to create Calendly scheduling link: {e}")
+            raise EventCreationError(f"Failed to create Calendly scheduling link: {e}") from e

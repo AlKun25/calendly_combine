@@ -158,3 +158,110 @@ class AvailabilitySchedule:
             A set of TimeSlot objects all in UTC timezone.
         """
         return {slot.to_utc() for slot in self.time_slots}
+
+@dataclass
+class EventParticipant:
+    """Represents a participant for a calendar event.
+    
+    Attributes:
+        email: Email address of the participant
+        name: Optional name of the participant
+        calendar_type: Type of calendar the participant uses
+        response_status: Optional response status (accepted, declined, etc.)
+    """
+    email: str
+    name: Optional[str] = None
+    calendar_type: Optional[CalendarType] = None
+    response_status: Optional[str] = None
+
+    def __post_init__(self):
+        """Validate participant data upon initialization."""
+        if not self.email or '@' not in self.email:
+            raise ValueError("Valid email is required for participant")
+
+
+@dataclass
+class CalendarEvent:
+    """Represents a calendar event to be created.
+    
+    Attributes:
+        title: Title/summary of the event
+        start_time: Start time of the event
+        end_time: End time of the event
+        timezone: Timezone of the event
+        description: Optional description of the event
+        location: Optional location of the event
+        participants: List of participants to invite
+        organizer: Email of the event organizer
+        metadata: Additional calendar-specific metadata
+    """
+    title: str
+    start_time: datetime
+    end_time: datetime
+    timezone: str
+    description: Optional[str] = None
+    location: Optional[str] = None
+    participants: List[EventParticipant] = field(default_factory=list)
+    organizer: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Validate event data upon initialization."""
+        if self.start_time >= self.end_time:
+            raise ValueError("Start time must be before end time")
+        
+        # Validate timezone
+        try:
+            pytz.timezone(self.timezone)
+        except pytz.exceptions.UnknownTimeZoneError:
+            raise ValueError(f"Unknown timezone: {self.timezone}")
+
+    @classmethod
+    def from_time_slot(cls, 
+                       time_slot: TimeSlot, 
+                       title: str, 
+                       participants: List[EventParticipant],
+                       description: Optional[str] = None,
+                       organizer: Optional[str] = None,
+                       location: Optional[str] = None) -> 'CalendarEvent':
+        """Create a CalendarEvent from a TimeSlot.
+        
+        Args:
+            time_slot: The TimeSlot to convert
+            title: The title for the event
+            participants: List of participants to invite
+            description: Optional description for the event
+            organizer: Optional email of the event organizer
+            location: Optional location for the event
+            
+        Returns:
+            A new CalendarEvent instance
+        """
+        return cls(
+            title=title,
+            start_time=time_slot.start,
+            end_time=time_slot.end,
+            timezone=time_slot.timezone,
+            description=description,
+            location=location,
+            participants=participants,
+            organizer=organizer
+        )
+
+
+@dataclass
+class EventConfirmation:
+    """Represents confirmation details for a created event.
+    
+    Attributes:
+        event_id: ID of the created event
+        calendar_link: Link to the event in the calendar
+        event: The event details
+        status: Status of the event creation
+        provider: The calendar provider used
+    """
+    event_id: str
+    calendar_link: str
+    event: CalendarEvent
+    status: str
+    provider: CalendarType
